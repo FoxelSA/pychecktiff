@@ -48,6 +48,13 @@ int total_errors   = 0;
 int total_warnings = 0;
 char * Messages[2][16];
 
+/* Memory file structure */
+typedef struct memory_file_struct {
+    unsigned char* data;
+    int length;
+    int seek_state;
+} memory_file;
+
 /* Function to insert a message */
 void insertMessage(const char* message, int type)
 {
@@ -109,6 +116,19 @@ PyObject * createResults(char * array[2][16], size_t esize, size_t wsize) {
         PyList_SET_ITEM(temp, i, PyString_FromString(Messages[1][i]));
     }
 
+    /* Flush error messages */
+    int x = 0;
+    for( x = 0; x < total_errors; x++ ){
+        free( Messages[ 0 ][ x ] );
+    }
+    total_errors = 0;
+
+    /* Flush warning messages */
+    for( x = 0; x < total_warnings; x++ ){
+        free( Messages[ 1 ][ x ] );
+    }
+    total_warnings = 0;
+
     /* Return result */
     return result;
 }
@@ -139,6 +159,80 @@ void TIFFWarning_Handler(const char* module, const char* fmt, va_list argptr)
     insertMessage( msg, 1 );
 }
 
+
+/* Function to read tiff file */
+static tsize_t tiff_Read(thandle_t fd, tdata_t data, tsize_t size)
+{
+    /* Cast memory file */
+    memory_file* handle = (memory_file *) fd;
+
+    /* Cursor clamping */
+    if ((size + handle->seek_state) > handle->length) {
+	   size = handle->length - handle->seek_state;
+    }
+
+    /* Check if size is ok */
+    if (size) {
+
+        /* Copy data region */
+    	memcpy((unsigned char *) data, handle->data + handle->seek_state, (size_t) size);
+
+        /* Update seek_state */
+    	handle->seek_state += size;
+    }
+
+    /* Return result */
+    return size;
+}
+
+/* Function to write tiff file (dummy) */
+static tsize_t tiff_Write(thandle_t fd, tdata_t data, tsize_t size)
+{
+    /* Return result */
+    return size;
+}
+
+/* Function to seek into buffer */
+static toff_t tiff_Seek(thandle_t fd, toff_t off, int whence)
+{
+    /* Cast memory file */
+    memory_file *handle = (memory_file *) fd;
+
+    /* Detect SEEK type & set proper state */
+    switch (whence) {
+    	case SEEK_SET:
+    	    handle->seek_state = (int) off;
+    	    break;
+    	case SEEK_CUR:
+    	    handle->seek_state += (int) off;
+    	    break;
+    	case SEEK_END:
+    	    handle->seek_state = handle->length + (int) off;
+    	    break;
+    }
+
+    /* Check if seek are ok */
+    if (handle->seek_state < 0) {
+        handle->seek_state = 0;
+        return -1;
+    }
+
+    /* Return result */
+    return (toff_t) handle->seek_state;
+}
+
+/* Function to close tiff file (dummy) */
+static int tiff_Close(thandle_t fd)
+{
+    return 0;
+}
+
+/* Function to get tiff size */
+static toff_t tiff_Size(thandle_t fd)
+{
+    return ((memory_file *) fd)->length;
+}
+
 /* The module doc string */
 PyDoc_STRVAR(pychecktiff__doc__,
 "A tiff file checker");
@@ -146,6 +240,33 @@ PyDoc_STRVAR(pychecktiff__doc__,
 /* The functions doc strings */
 PyDoc_STRVAR(validate_tiff_from_file__doc__,
 "Function to check validity of a TIFF file from file");
+
+PyDoc_STRVAR(validate_tiff_from_buffer__doc__,
+"Function to check validity of a TIFF file from buffer");
+
+void scan_tiff( TIFF* tiff_file )
+{
+    /* Image infos containers */
+    uint32 imagelength;
+    tdata_t buf;
+    uint32 row;
+
+    /* Get image length */
+    TIFFGetField(tiff_file, TIFFTAG_IMAGELENGTH, &imagelength);
+
+    /* Allocate buffer */
+    buf = _TIFFmalloc(TIFFScanlineSize( tiff_file ));
+
+    /* Iterate over rows */
+    for (row = 0; row < imagelength; row++){
+
+        /* Read row */
+        TIFFReadScanline(tiff_file, buf, row, imagelength);
+    }
+
+    /* Free buffer */
+    _TIFFfree(buf);
+}
 
 /* The wrapper to the underlying C function of validate_tiff */
 static PyObject *
@@ -164,26 +285,50 @@ py_validate_tiff_from_file(PyObject *self, PyObject *args)
     /* Check if TIFF file is properly loaded */
     if (tif) {
 
-        /* Image infos containers */
-        uint32 imagelength;
-        tdata_t buf;
-        uint32 row;
+        /* Scan tiff file */
+        scan_tiff( tif );
 
-        /* Get image length */
-        TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &imagelength);
+        /* CLose image */
+        TIFFClose(tif);
+    }
 
-        /* Allocate buffer */
-        buf = _TIFFmalloc(TIFFScanlineSize(tif));
+    /* Create results object */
+    PyObject * results = createResults(Messages, total_errors, total_warnings);
 
-        /* Iterate over rows */
-        for (row = 0; row < imagelength; row++){
+    /* Return result */
+    return results;
+}
 
-            /* Read row */
-            TIFFReadScanline(tif, buf, row, imagelength);
-        }
+/* The wrapper to the underlying C function for validate_tiff_from_buffer */
+static PyObject *
+py_validate_tiff_from_buffer(PyObject *self, PyObject *args)
+{
+	/* Arguments containers */
+	unsigned char * buffer;
+	int buffer_length = 0;
 
-        /* Free buffer */
-        _TIFFfree(buf);
+	/* Try to parse arguments */
+	if (!PyArg_ParseTuple(args, "s#:validate_tiff_from_buffer", &buffer, &buffer_length))
+		return NULL;
+
+    /* Initialize memory file container */
+    memory_file* main_file_buffer = (memory_file*)malloc( sizeof( memory_file ) );
+
+    /* Assign values to memory file */
+    main_file_buffer->data = buffer;
+    main_file_buffer->length = buffer_length;
+    main_file_buffer->seek_state = 0;
+
+    /* Open TIFF file from memory */
+    TIFF* tif = TIFFClientOpen("inline data", "r", (thandle_t) main_file_buffer,
+    tiff_Read, tiff_Write, tiff_Seek, tiff_Close,
+    tiff_Size, NULL, NULL);
+
+    /* Check if TIFF file is properly loaded */
+    if (tif) {
+
+        /* Scan tiff file */
+        scan_tiff( tif );
 
         /* CLose image */
         TIFFClose(tif);
@@ -199,6 +344,7 @@ py_validate_tiff_from_file(PyObject *self, PyObject *args)
 /* Internal python methods bindings */
 static PyMethodDef pychecktiff_methods[] = {
     {"validate_tiff_from_file",  py_validate_tiff_from_file, METH_VARARGS, validate_tiff_from_file__doc__},
+    {"validate_tiff_from_buffer",  py_validate_tiff_from_buffer, METH_VARARGS, validate_tiff_from_buffer__doc__},
     {NULL, NULL}      /* sentinel */
 };
 
@@ -206,7 +352,6 @@ static PyMethodDef pychecktiff_methods[] = {
 PyMODINIT_FUNC
 initpychecktiff(void)
 {
-
     /* Warning/Error handlers */
     TIFFSetErrorHandler( TIFFError_Handler );
     TIFFSetWarningHandler( TIFFWarning_Handler );
