@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-  pycheckjpeg - Python module to check integrity of TIFF files
+  pychecktiff - Python module to check integrity of TIFF files
 
   Copyright (c) 2015 FOXEL SA - http://foxel.ch
   Please read <http://foxel.ch/license> for more information.
