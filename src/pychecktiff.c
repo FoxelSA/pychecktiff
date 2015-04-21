@@ -41,7 +41,7 @@
 #include <stdlib.h>
 #include <tiffio.h>
 
-#define MAX_MESSAGE_LENGTH 128
+#define MAX_MESSAGE_LENGTH 512
 
 /* Global error counter */
 int total_errors   = 0;
