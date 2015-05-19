@@ -43,7 +43,7 @@ from distutils.core import setup, Extension
 
 setup(
         name="pychecktiff",
-        version="0.1",
+        version="1.0.2",
         ext_modules = [
             Extension(
                 "pychecktiff",
